@@ -2073,6 +2073,22 @@ public abstract class RestServiceBase {
 		return id;
 	}
 	
+	public Result changeStreamTime(String streamId, int streamTime) {
+		Result result = new Result(false);
+		
+		if (streamId != null && (getDataStore().get(streamId)) != null && streamTime >= 0 ) {
+			result.setSuccess(true);
+
+			getApplication().getStreamFetcherManager().getStreamFetcher(streamId).isSeek= true;
+			getApplication().getStreamFetcherManager().getStreamFetcher(streamId).streamTime = streamTime;
+		}
+		else {
+			result.setMessage("Please check your stream ID or streamTime parameters");
+		}
+
+		return result;
+	}
+	
 	public Result enableRecordMuxing(String streamId, boolean enableRecording, String  type ) {
 		boolean result = false;
 		String message = null;

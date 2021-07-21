@@ -23,6 +23,7 @@ import org.bytedeco.ffmpeg.avformat.AVFormatContext;
 import org.bytedeco.ffmpeg.avutil.AVDictionary;
 import org.bytedeco.ffmpeg.avutil.AVRational;
 import org.bytedeco.ffmpeg.global.avcodec;
+import org.bytedeco.ffmpeg.global.avformat;
 import org.bytedeco.ffmpeg.global.avutil;
 import org.red5.server.api.scope.IScope;
 import org.slf4j.Logger;
@@ -105,6 +106,10 @@ public class StreamFetcher {
 	private String streamId;
 
 	private String streamType;
+	
+	public boolean isSeek;
+	
+	public int streamTime = 0;
 
 	public IStreamFetcherListener getStreamFetcherListener() {
 		return streamFetcherListener;
@@ -226,6 +231,8 @@ public class StreamFetcher {
 
 		private long lastPacketTimeMsInQueue;
 
+		private long seekDurationMS = 0;
+
 		@Override
 		public void run() {
 
@@ -307,17 +314,18 @@ public class StreamFetcher {
 							 * Check that dts values are monotically increasing for each stream
 							 */
 							int packetIndex = pkt.stream_index();
-							if (lastDTS[packetIndex] >= pkt.dts()) {
-								logger.info("last dts{} is bigger than incoming dts {}", pkt.dts(), lastDTS[packetIndex]);
-								pkt.dts(lastDTS[packetIndex] + 1);
-								
+							
+							if(!STREAM_TYPE_VOD.equals(streamType) && ! streamUrl.contains(".mp4") ) {
+								if (lastDTS[packetIndex] >= pkt.dts()) {
+									logger.info("last dts{} is bigger than incoming dts {}", pkt.dts(), lastDTS[packetIndex]);
+									pkt.dts(lastDTS[packetIndex] + 1);
+								}
+								lastDTS[packetIndex] = pkt.dts();
+								if (pkt.dts() > pkt.pts()) {
+									logger.info("dts ({}) is bigger than pts({})", pkt.dts(), pkt.pts());
+									pkt.pts(pkt.dts());
+								}
 							}
-							lastDTS[packetIndex] = pkt.dts();
-							if (pkt.dts() > pkt.pts()) {
-								logger.info("dts ({}) is bigger than pts({})", pkt.dts(), pkt.pts());
-								pkt.pts(pkt.dts());
-							}
-
 							/***************************************************
 							 *  Memory of being paranoid or failing while looking for excellence without understanding the whole picture
 							 *  
@@ -378,38 +386,51 @@ public class StreamFetcher {
 								}
 							}
 							else {
-
-								if(STREAM_TYPE_VOD.equals(streamType)) {
-
-									if(firstPacketTime == 0) {
-										int streamIndex = pkt.stream_index();
-										firstPacketTime = System.currentTimeMillis();
-										long firstPacketDtsInMs = av_rescale_q(pkt.dts(), inputFormatContext.streams(streamIndex).time_base(), MuxAdaptor.TIME_BASE_FOR_MS);
-										timeOffset = 0 - firstPacketDtsInMs;
-									}
-
+								if(STREAM_TYPE_VOD.equals(streamType) ||  streamUrl.contains(".mp4")  ) {
 									long latestTime = System.currentTimeMillis();
-
 									int streamIndex = pkt.stream_index();
-
 									AVRational timeBase = inputFormatContext.streams(streamIndex).time_base();
 
+									if(firstPacketTime == 0 ) { 
+										firstPacketTime = System.currentTimeMillis();
+										long firstPacketDtsInMs = av_rescale_q(pkt.dts(), timeBase, MuxAdaptor.TIME_BASE_FOR_MS);
+										timeOffset = 0 - firstPacketDtsInMs;
+									}
 									long pktTime = av_rescale_q(pkt.dts(), timeBase, MuxAdaptor.TIME_BASE_FOR_MS);
-
+								
 									long durationInMs = latestTime - firstPacketTime;
-
-									long dtsInMS= timeOffset + pktTime;
-
-									while(dtsInMS > durationInMs) {
+									long dtsInMS= timeOffset + pktTime + seekDurationMS;						
+							
+									 while(dtsInMS > durationInMs) {
 										durationInMs = System.currentTimeMillis() - firstPacketTime;
 										Thread.sleep(1);
 									}
-								}
+									
+									 if(isSeek) {
+										 if(streamTime == 0) {
+											 streamTime = 1;
+										 }
+										  seekDurationMS = durationInMs - streamTime*1000;
 
+										 int flags = avformat.AVSEEK_FLAG_ANY;
+										 int seekTarget = streamTime * timeBase.den() / timeBase.num();
+									
+										 if(avformat.av_seek_frame(inputFormatContext, streamIndex , seekTarget,  flags) < 0) {
+											 logger.error("There is an error with av_seek_frame");
+										 }
+										 
+										av_read_frame(inputFormatContext, pkt);
+										 isSeek = false;			
+										 }
+										if(seekDurationMS != 0) {
+											pkt.dts(av_rescale_q(dtsInMS, MuxAdaptor.TIME_BASE_FOR_MS , timeBase));
+											pkt.pts(av_rescale_q(dtsInMS, MuxAdaptor.TIME_BASE_FOR_MS, timeBase));
+										}
+									 }
 								muxAdaptor.writePacket(inputFormatContext.streams(pkt.stream_index()), pkt);
-
 							}
 							av_packet_unref(pkt);
+							
 							if (stopRequestReceived) {
 								logger.warn("Stop request received, breaking the loop for {} ", streamId);
 								break;
